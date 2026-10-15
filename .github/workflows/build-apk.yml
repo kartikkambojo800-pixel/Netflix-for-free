@@ -1,17 +1,18 @@
-name: Build Kartik Kamboj Nocturne Music APK
+name: Build Kartik Kamboj Music APK
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    paths:
+      - "Kartik-Kamboj-Music-source-NocturneRedesign.zip"
+      - ".github/workflows/**"
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build Universal Debug APK
+    name: Build Android APK
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -19,54 +20,62 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find and extract NocturneRedesign ZIP
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ZIP_FILE="$(find . -maxdepth 2 -type f \
-            -name 'Kartik-Kamboj-Music-source-NocturneRedesign.zip' \
-            -not -path './_kk_build/*' -print -quit)"
-
-          if [[ -z "$ZIP_FILE" ]]; then
-            echo "::error::NocturneRedesign ZIP was not found."
-            echo "Upload Kartik-Kamboj-Music-source-NocturneRedesign.zip to the repository root."
-            exit 1
-          fi
-
-          mkdir -p _kk_build
-          unzip -oq "$ZIP_FILE" -d _kk_build
-
-          GRADLEW="$(find _kk_build -type f -name gradlew -print -quit)"
-
-          if [[ -z "$GRADLEW" ]]; then
-            echo "::error::gradlew was not found inside the ZIP."
-            exit 1
-          fi
-
-          PROJECT_DIR="$(dirname "$GRADLEW")"
-
-          if [[ ! -f "$PROJECT_DIR/settings.gradle.kts" ]]; then
-            echo "::error::settings.gradle.kts was not found."
-            exit 1
-          fi
-
-          if [[ ! -f "$PROJECT_DIR/app/build.gradle.kts" ]]; then
-            echo "::error::Android app module was not found."
-            exit 1
-          fi
-
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Project directory: $PROJECT_DIR"
-          ls -la "$PROJECT_DIR"
-
       - name: Set up Java 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: "21"
+          cache: gradle
 
-      - name: Accept Android SDK licenses and install requirements
+      - name: Locate and extract project ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP_FILE="Kartik-Kamboj-Music-source-NocturneRedesign.zip"
+
+          if [[ ! -f "$ZIP_FILE" ]]; then
+            echo "::error::ZIP not found: $ZIP_FILE"
+            echo "Files available in repository:"
+            find . -maxdepth 3 -type f | head -200
+            exit 1
+          fi
+
+          mkdir -p "$GITHUB_WORKSPACE/_kk_build"
+          unzip -q "$ZIP_FILE" -d "$GITHUB_WORKSPACE/_kk_build"
+
+          echo "Extracted project files:"
+          find "$GITHUB_WORKSPACE/_kk_build" \
+            -maxdepth 4 \
+            \( -name gradlew -o -name settings.gradle \
+            -o -name settings.gradle.kts \) -print
+
+      - name: Find Gradle project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="$GITHUB_WORKSPACE/_kk_build"
+
+          GRADLEW="$(find "$ROOT" -type f -name gradlew -print -quit)"
+
+          if [[ -z "$GRADLEW" ]]; then
+            echo "::error::gradlew not found in the ZIP"
+            find "$ROOT" -maxdepth 4 -type f | head -200
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$GRADLEW")"
+          chmod +x "$GRADLEW"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Gradle project: $PROJECT_DIR"
+
+          if [[ -f "$PROJECT_DIR/local.properties" ]]; then
+            rm -f "$PROJECT_DIR/local.properties"
+          fi
+
+      - name: Install Android SDK requirements
         shell: bash
         run: |
           set -euo pipefail
@@ -74,17 +83,19 @@ jobs:
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
 
           if [[ ! -x "$SDKMANAGER" ]]; then
-            echo "::error::Android SDK manager was not found."
+            echo "::error::Android SDK manager not found"
             exit 1
           fi
 
-          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
 
           "$SDKMANAGER" --install \
-            "platforms;android-37" \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
             "ndk;28.2.13676358"
 
-      - name: Prepare debug signing key
+      - name: Create debug signing key
         shell: bash
         run: |
           set -euo pipefail
@@ -93,43 +104,57 @@ jobs:
 
           if [[ ! -f "$HOME/.android/debug.keystore" ]]; then
             keytool -genkeypair \
+              -v \
               -keystore "$HOME/.android/debug.keystore" \
               -storepass android \
               -alias androiddebugkey \
               -keypass android \
-              -dname "CN=Android Debug,O=Android,C=US" \
               -keyalg RSA \
-              -validity 10000
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      - name: Build universal FOSS debug APK
-        working-directory: ${{ env.PROJECT_DIR }}
+      - name: Show Gradle tasks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          ./gradlew --no-daemon tasks --all
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+
+          ./gradlew \
+            --no-daemon \
+            --stacktrace \
+            assembleUniversalFossDebug
+
+      - name: Find generated APKs
         shell: bash
         run: |
           set -euo pipefail
 
-          chmod +x gradlew
-          ./gradlew --no-daemon --stacktrace assembleUniversalFossDebug
+          mkdir -p "$GITHUB_WORKSPACE/apk-output"
 
-      - name: Verify APK output
-        shell: bash
-        env:
-          PROJECT_DIR: ${{ env.PROJECT_DIR }}
-        run: |
-          set -euo pipefail
+          find "$PROJECT_DIR" -type f -name "*.apk" \
+            -exec cp {} "$GITHUB_WORKSPACE/apk-output/" \;
 
-          APK_DIR="$PROJECT_DIR/app/build/outputs/apk"
-          find "$APK_DIR" -type f -name '*.apk' -print
-
-          if ! find "$APK_DIR" -type f -name '*.apk' -print -quit | grep -q .; then
-            echo "::error::Build completed without an APK file."
+          if ! find "$GITHUB_WORKSPACE/apk-output" \
+            -type f -name "*.apk" -print -quit | grep -q .; then
+            echo "::error::No APK was generated"
             exit 1
           fi
 
-      - name: Upload APK artifact
+          ls -lh "$GITHUB_WORKSPACE/apk-output"
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Kartik-Kamboj-Nocturne-Universal-Debug-APK
-          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/**/*.apk
+          name: Kartik-Kamboj-Music-APK
+          path: apk-output/*.apk
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
