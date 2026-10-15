@@ -1,3 +1,4 @@
+
 name: Build OpenStream APK
 
 on:
@@ -20,22 +21,16 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Make Gradle executable
-        run: |
-          if [ -f gradlew ]; then
-            chmod +x gradlew
-          else
-            echo "gradlew not found in repository root"
-            exit 1
-          fi
-
       - name: Build debug APK
-        run: ./gradlew assembleDebug --no-daemon
+        working-directory: OpenStream-main
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: OpenStream-debug-APK
-          path: app/build/outputs/apk/debug/*.apk
+          path: OpenStream-main/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           
