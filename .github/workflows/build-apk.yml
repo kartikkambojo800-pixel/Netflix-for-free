@@ -21,13 +21,17 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Java 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "21"
-          cache: gradle
 
-      - name: Locate and extract project ZIP
+      - name: Install unzip
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip
+
+      - name: Find and extract source ZIP
         shell: bash
         run: |
           set -euo pipefail
@@ -35,47 +39,51 @@ jobs:
           ZIP_FILE="Kartik-Kamboj-Music-source-NocturneRedesign.zip"
 
           if [[ ! -f "$ZIP_FILE" ]]; then
-            echo "::error::ZIP not found: $ZIP_FILE"
-            echo "Files available in repository:"
-            find . -maxdepth 3 -type f | head -200
+            echo "::error::Source ZIP not found: $ZIP_FILE"
+            echo "ZIP files in repository:"
+            find . -type f -iname "*.zip" -print
             exit 1
           fi
 
           mkdir -p "$GITHUB_WORKSPACE/_kk_build"
           unzip -q "$ZIP_FILE" -d "$GITHUB_WORKSPACE/_kk_build"
 
-          echo "Extracted project files:"
+          echo "ZIP extracted successfully."
+          echo "Gradle wrapper files:"
           find "$GITHUB_WORKSPACE/_kk_build" \
-            -maxdepth 4 \
-            \( -name gradlew -o -name settings.gradle \
+            -type f \( -name gradlew \
+            -o -name settings.gradle \
             -o -name settings.gradle.kts \) -print
 
-      - name: Find Gradle project
+      - name: Locate Android Gradle project
         shell: bash
         run: |
           set -euo pipefail
 
           ROOT="$GITHUB_WORKSPACE/_kk_build"
-
           GRADLEW="$(find "$ROOT" -type f -name gradlew -print -quit)"
 
           if [[ -z "$GRADLEW" ]]; then
-            echo "::error::gradlew not found in the ZIP"
+            echo "::error::gradlew was not found in the ZIP."
+            echo "Extracted files:"
             find "$ROOT" -maxdepth 4 -type f | head -200
             exit 1
           fi
 
           PROJECT_DIR="$(dirname "$GRADLEW")"
+
+          if [[ ! -f "$PROJECT_DIR/settings.gradle" && \
+                ! -f "$PROJECT_DIR/settings.gradle.kts" ]]; then
+            echo "::error::Gradle settings file not found beside gradlew."
+            exit 1
+          fi
+
           chmod +x "$GRADLEW"
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
           echo "Gradle project: $PROJECT_DIR"
 
-          if [[ -f "$PROJECT_DIR/local.properties" ]]; then
-            rm -f "$PROJECT_DIR/local.properties"
-          fi
-
-      - name: Install Android SDK requirements
+      - name: Install Android SDK
         shell: bash
         run: |
           set -euo pipefail
@@ -83,7 +91,7 @@ jobs:
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
 
           if [[ ! -x "$SDKMANAGER" ]]; then
-            echo "::error::Android SDK manager not found"
+            echo "::error::Android SDK manager was not found."
             exit 1
           fi
 
@@ -92,8 +100,33 @@ jobs:
           "$SDKMANAGER" --install \
             "platform-tools" \
             "platforms;android-36" \
-            "build-tools;36.0.0" \
-            "ndk;28.2.13676358"
+            "build-tools;36.0.0"
+
+      - name: Install NDK if project specifies a version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="$(
+            grep -RhoE \
+              'ndkVersion[[:space:]]*=[[:space:]]*"[^"]+"' \
+              "$PROJECT_DIR" \
+              --include='*.gradle' \
+              --include='*.gradle.kts' \
+              2>/dev/null \
+            | head -1 \
+            | sed -E 's/.*"([^"]+)".*/\1/' || true
+          )"
+
+          if [[ -n "$VERSION" ]]; then
+            echo "Installing project NDK version: $VERSION"
+
+            SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+            yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+            "$SDKMANAGER" --install "ndk;$VERSION"
+          else
+            echo "No explicit ndkVersion found; Gradle will resolve requirements."
+          fi
 
       - name: Create debug signing key
         shell: bash
@@ -104,7 +137,6 @@ jobs:
 
           if [[ ! -f "$HOME/.android/debug.keystore" ]]; then
             keytool -genkeypair \
-              -v \
               -keystore "$HOME/.android/debug.keystore" \
               -storepass android \
               -alias androiddebugkey \
@@ -115,14 +147,14 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      - name: Show Gradle tasks
+      - name: Show available build tasks
         shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
           ./gradlew --no-daemon tasks --all
 
-      - name: Build debug APK
+      - name: Build APK
         shell: bash
         run: |
           set -euo pipefail
@@ -133,25 +165,27 @@ jobs:
             --stacktrace \
             assembleUniversalFossDebug
 
-      - name: Find generated APKs
+      - name: Collect generated APKs
         shell: bash
         run: |
           set -euo pipefail
 
           mkdir -p "$GITHUB_WORKSPACE/apk-output"
 
-          find "$PROJECT_DIR" -type f -name "*.apk" \
+          find "$PROJECT_DIR" \
+            -type f -name "*.apk" \
+            -path "*/build/outputs/*" \
             -exec cp {} "$GITHUB_WORKSPACE/apk-output/" \;
 
           if ! find "$GITHUB_WORKSPACE/apk-output" \
             -type f -name "*.apk" -print -quit | grep -q .; then
-            echo "::error::No APK was generated"
+            echo "::error::No APK found after build."
             exit 1
           fi
 
           ls -lh "$GITHUB_WORKSPACE/apk-output"
 
-      - name: Upload APK
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: Kartik-Kamboj-Music-APK
