@@ -1,173 +1,41 @@
-name: Build Kartik Kamboj Music APK
-
+name: Build Kartik Kamboj Music APK (from ZIP)
 on:
   workflow_dispatch:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: kartik-kamboj-music-build
-  cancel-in-progress: true
-
 jobs:
   build:
-    name: Build Android APK
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Java 21
-        uses: actions/setup-java@v5
+      - uses: actions/checkout@v4
+      - name: Find and extract the source ZIP
+        run: |
+          ZIP=$(find . -maxdepth 2 -iname "Kartik-Kamboj-Music-source-SaffronNoir.zip" -not -path "./_kk_build/*" | head -1)
+          if [ -z "$ZIP" ]; then echo "ERROR: zip nahi mili"; exit 1; fi
+          mkdir -p _kk_build
+          unzip -q "$ZIP" -d _kk_build
+          GRADLEW=$(find _kk_build -maxdepth 3 -name gradlew | head -1)
+          if [ -z "$GRADLEW" ]; then echo "ERROR: gradlew nahi mila"; exit 1; fi
+          echo "PROJECT_DIR=$(dirname "$GRADLEW")" >> "$GITHUB_ENV"
+      - uses: actions/setup-java@v4
         with:
-          distribution: temurin
           java-version: '21'
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Find and extract source ZIP
-        shell: bash
+          distribution: 'temurin'
+          cache: gradle
+      - name: Install NDK
         run: |
-          set -euo pipefail
-
-          ZIP="$GITHUB_WORKSPACE/Kartik-Kamboj-Music-Video-Edition.zip"
-
-          if [ ! -f "$ZIP" ]; then
-            ZIP="$(find "$GITHUB_WORKSPACE" \
-              -maxdepth 3 -type f \
-              -iname 'Kartik-Kamboj-Music-Video-Edition.zip' \
-              ! -path '*/_kk_build/*' \
-              ! -path '*/.git/*' \
-              | head -n 1 || true)"
-          fi
-
-          if [ -z "$ZIP" ] || [ ! -f "$ZIP" ]; then
-            echo "::error::Music source ZIP not found."
-            echo "Upload Kartik-Kamboj-Music-Video-Edition.zip to the repository."
-            exit 1
-          fi
-
-          echo "Using ZIP: $ZIP"
-
-          mkdir -p "$GITHUB_WORKSPACE/_kk_build"
-          unzip -q "$ZIP" -d "$GITHUB_WORKSPACE/_kk_build"
-
-          GRADLEW="$(find "$GITHUB_WORKSPACE/_kk_build" \
-            -type f -name gradlew \
-            ! -path '*/.gradle/*' \
-            | head -n 1 || true)"
-
-          if [ -z "$GRADLEW" ]; then
-            echo "::error::Gradle wrapper not found inside ZIP."
-            exit 1
-          fi
-
-          PROJECT_DIR="$(cd "$(dirname "$GRADLEW")" && pwd)"
-
-          if [ ! -f "$PROJECT_DIR/settings.gradle" ] && \
-             [ ! -f "$PROJECT_DIR/settings.gradle.kts" ]; then
-            echo "::error::Gradle settings file not found."
-            exit 1
-          fi
-
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Project directory: $PROJECT_DIR"
-          ls -la "$PROJECT_DIR"
-
-      - name: Install Android SDK components
-        shell: bash
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;28.2.13676358"
+      - name: Create debug keystore
         run: |
-          set -euo pipefail
-
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-
-          if [ ! -x "$SDKMANAGER" ]; then
-            echo "::error::Android SDK manager not found."
-            exit 1
-          fi
-
-          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
-
-          "$SDKMANAGER" --install \
-            "platform-tools" \
-            "platforms;android-36" \
-            "build-tools;36.0.0" \
-            "ndk;28.2.13676358"
-
-      - name: Create Android debug keystore
-        shell: bash
-        run: |
-          set -euo pipefail
-
           mkdir -p "$HOME/.android"
-
-          if [ ! -f "$HOME/.android/debug.keystore" ]; then
-            keytool -genkeypair \
-              -keystore "$HOME/.android/debug.keystore" \
-              -storepass android \
-              -alias androiddebugkey \
-              -keypass android \
-              -dname "CN=Android Debug,O=Android,C=US" \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000
-          fi
-
-          test -f "$HOME/.android/debug.keystore"
-          echo "Debug keystore is ready."
-
-      - name: Build universal Foss debug APK
+          keytool -genkeypair -keystore "$HOME/.android/debug.keystore" \
+            -storepass android -alias androiddebugkey -keypass android \
+            -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -validity 10000
+      - name: Build universal debug APK
         working-directory: ${{ env.PROJECT_DIR }}
-        shell: bash
         run: |
-          set -o pipefail
-
           chmod +x gradlew
-
-          ./gradlew :app:assembleUniversalFossDebug \
-            --no-daemon \
-            --stacktrace \
-            --console=plain \
-            2>&1 | tee "$RUNNER_TEMP/android-build.log"
-
-      - name: Collect APK files
-        if: success()
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p "$GITHUB_WORKSPACE/apk-output"
-
-          find "$PROJECT_DIR/app/build/outputs/apk" \
-            -type f -name '*.apk' \
-            -exec cp {} "$GITHUB_WORKSPACE/apk-output/" \;
-
-          if ! find "$GITHUB_WORKSPACE/apk-output" \
-            -maxdepth 1 -type f -name '*.apk' | grep -q .; then
-            echo "::error::No APK was generated."
-            exit 1
-          fi
-
-          ls -lh "$GITHUB_WORKSPACE/apk-output"
-
-      - name: Upload APK
-        if: success()
-        uses: actions/upload-artifact@v4
+          ./gradlew assembleUniversalFossDebug
+      - uses: actions/upload-artifact@v4
         with:
           name: Kartik-Kamboj-Music-APK
-          path: apk-output/*.apk
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Upload build error log
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Kartik-Kamboj-Build-Error-Log
-          path: ${{ runner.temp }}/android-build.log
-          if-no-files-found: ignore
-          retention-days: 7
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/**/*.apk
